@@ -4,6 +4,9 @@ channels:
   - conda-forge
 dependencies:
   - python=3.11
+  - pip
+  - setuptools
+  - wheel
   - pandas
   - numpy
   - scipy
@@ -11,7 +14,6 @@ dependencies:
   - scikit-learn
   - tqdm
   - pyarrow
-  - pip
   - pip:
     - ollama
     - datasets
