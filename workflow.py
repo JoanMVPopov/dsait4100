@@ -8,8 +8,13 @@ from tqdm import tqdm
 
 from classification import classify_query
 
+PROJECT_ROOT = Path(__file__).resolve().parent
 
-OUTPUT_PATH = Path("/workspace/results_ollama_runs.jsonl")
+# HUMAN_DATA_PATH = PROJECT_ROOT / "data" / "hatexplain" / "hatexplain_sampled_30.csv"
+# RESULTS_PATH = PROJECT_ROOT / "data" / "hatexplain" / "results_ollama_runs.jsonl"
+
+# OUTPUT_PATH = Path("/workspace/results_ollama_runs.jsonl")
+OUTPUT_PATH = PROJECT_ROOT / "results_ollama_runs.jsonl"
 
 SEEDS = [42, 43, 44, 45, 46]
 
@@ -38,7 +43,9 @@ You classify speech as hate speech only when it clearly targets a protected grou
 """.strip(),
 }
 
-QUERIES = pd.read_csv("/workspace/hatexplain_sampled_wflow_ready_30.csv").to_dict(orient="records")
+# QUERIES = pd.read_csv("/workspace/hatexplain_sampled_wflow_ready_30.csv").to_dict(orient="records")
+QUERIES_PATH = PROJECT_ROOT / "data" / "hatexplain" / "hatexplain_sampled_wflow_ready_30.csv"
+QUERIES = pd.read_csv(QUERIES_PATH).to_dict(orient="records")
 
 async def run_one_request(
     client,
