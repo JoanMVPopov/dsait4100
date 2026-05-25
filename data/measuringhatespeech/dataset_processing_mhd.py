@@ -54,9 +54,9 @@ def add_entropy_bins(data, entropy_col="entropy"):
     print(f"66th percentile: {q66:.4f}")
 
     def assign_bin(x):
-        if x <= q33:
+        if x == 0:
             return "low_disagreement"
-        elif x <= q66:
+        elif x < q66:
             return "medium_disagreement"
         else:
             return "high_disagreement"
@@ -107,8 +107,8 @@ global_df = global_df[
 print("\nGlobal bin counts:")
 print(global_df["disagreement_bin"].value_counts())
 
-global_df.to_csv("mhs_global_entropy_bins.csv", index=False)
-print("\nSaved: mhs_global_entropy_bins.csv")
+global_df.to_csv("mhs_global_entropy_bins_fixed.csv", index=False)
+print("\nSaved: mhs_global_entropy_bins_fixed.csv")
 
 
 
@@ -206,10 +206,14 @@ print("\nSaved: mhs_persona_entropy_bins.csv")
 N_PER_BIN = 1000
 RANDOM_STATE = 42
 
+global_min = np.min(global_df["disagreement_bin"].value_counts())
+print("This is the minimum in bins")
+print(global_min)
+
 global_sample = (
     global_df
     .groupby("disagreement_bin", group_keys=False)
-    .apply(lambda x: x.sample(min(len(x), N_PER_BIN), random_state=RANDOM_STATE))
+    .apply(lambda x: x.sample(max(global_min, N_PER_BIN), random_state=RANDOM_STATE))
 )
 
 persona_sample = (
@@ -218,8 +222,8 @@ persona_sample = (
     .apply(lambda x: x.sample(min(len(x), N_PER_BIN), random_state=RANDOM_STATE))
 )
 
-global_sample.to_csv("mhs_global_entropy_bins_sampled.csv", index=False)
-persona_sample.to_csv("mhs_persona_entropy_bins_sampled.csv", index=False)
+global_sample.to_csv("mhs_global_entropy_bins_fixed_sampled.csv", index=False)
+persona_sample.to_csv("mhs_persona_entropy_bins_fixed_sampled.csv", index=False)
 
 print("\nSaved sampled files:")
 print("mhs_global_entropy_bins_sampled.csv")
