@@ -226,7 +226,7 @@ global_sample.to_csv("mhs_global_entropy_bins_fixed_sampled.csv", index=False)
 persona_sample.to_csv("mhs_persona_entropy_bins_fixed_sampled.csv", index=False)
 
 print("\nSaved sampled files:")
-print("mhs_global_entropy_bins_sampled.csv")
+print("mhs_global_entropy_bins_fixed_sampled.csv")
 print("mhs_persona_entropy_bins_sampled.csv")
 
 print("\nSampled global bin counts:")
