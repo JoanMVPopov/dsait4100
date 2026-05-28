@@ -18,7 +18,7 @@ class AgreementBin(StrEnum):
 TOTAL_ANNOTATORS = 3
 VALID_LABEL_VALUES = {label.value for label in ValidLabels}
 REQUIRED_BINS = {bin.value for bin in AgreementBin}
-SAMPLES_PER_BIN = 10
+# SAMPLES_PER_BIN = 10
 RANDOM_SEED = 42
 
 def tokens_to_text(tokens):
@@ -107,14 +107,21 @@ if __name__ == "__main__":
     if missing_bins:
         raise ValueError(f"Missing expected bins: {missing_bins}")
 
-    bin_counts = df["stability_bins"].value_counts()
+    # min(samples_bin_1, samples_bin_2, samples_bin_3)
+    bin_counts = df["stability_bins"].value_counts(ascending=True)
+    SAMPLES_PER_BIN = bin_counts.iloc[0]
 
-    for bin_name in REQUIRED_BINS:
-        if bin_counts[bin_name] < SAMPLES_PER_BIN:
-            raise ValueError(
-                f"Not enough rows in {bin_name}. "
-                f"Needed {SAMPLES_PER_BIN}, found {bin_counts[bin_name]}."
-            )
+    print(f"\nSamples per bin: {SAMPLES_PER_BIN}")
+    print(f"\nBin with lowest number of samples: {bin_counts.index[0]}")
+
+    # bin_counts = df["stability_bins"].value_counts()
+    #
+    # for bin_name in REQUIRED_BINS:
+    #     if bin_counts[bin_name] < SAMPLES_PER_BIN:
+    #         raise ValueError(
+    #             f"Not enough rows in {bin_name}. "
+    #             f"Needed {SAMPLES_PER_BIN}, found {bin_counts[bin_name]}."
+    #         )
 
     sampled_df = (
         df.groupby("stability_bins", group_keys=False)
