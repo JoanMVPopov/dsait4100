@@ -21,7 +21,7 @@ def load_jsonl(path):
 if __name__ == "__main__":
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-    HUMAN_DATA_PATH = PROJECT_ROOT / "data" / "hatexplain" / "hatexplain_sampled_30.csv"
+    HUMAN_DATA_PATH = PROJECT_ROOT / "data" / "hatexplain" / "hatexplain_sampled_1500.csv"
     RESULTS_PATH = PROJECT_ROOT / "data" / "hatexplain" / "results_ollama_runs.jsonl"
 
     human_df = pd.read_csv(HUMAN_DATA_PATH)
@@ -157,7 +157,6 @@ if __name__ == "__main__":
     print("\nBaseline dataframe:")
     print(baseline_df.shape)
 
-    print("TUK")
     pd.set_option('display.max_columns', None)
     print(baseline_df.head())
 

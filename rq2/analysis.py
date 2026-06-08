@@ -4,10 +4,14 @@ from pathlib import Path
 
 import pandas as pd
 from matplotlib import pyplot as plt
-from scipy.stats import shapiro, levene, ttest_ind, mannwhitneyu, kruskal
+from sklearn.metrics import roc_auc_score, precision_score, recall_score, average_precision_score, roc_curve, \
+    precision_recall_curve
 
 from data.hatexplain.preprocess_hatexplain import VALID_LABEL_VALUES, calculate_shannon_entropy, AgreementBin
-
+from scipy.stats import spearmanr
+import numpy as np
+import seaborn as sns
+import matplotlib.ticker as mtick
 
 def load_jsonl(path):
     rows = []
@@ -18,11 +22,20 @@ def load_jsonl(path):
 
     return pd.DataFrame(rows)
 
+def calculate_variation_ratio(label_counts):
+    if not label_counts:
+        return 0.0
+    total_votes = sum(label_counts.values())
+    max_votes = max(label_counts.values())
+    return round(1.0 - (max_votes / total_votes), 2)
+
 if __name__ == "__main__":
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-    HUMAN_DATA_PATH = PROJECT_ROOT / "data" / "hatexplain" / "hatexplain_sampled_30.csv"
-    RESULTS_PATH = PROJECT_ROOT / "data" / "hatexplain" / "results_ollama_runs.jsonl"
+    # HUMAN_DATA_PATH = PROJECT_ROOT / "data" / "hatexplain" / "hatexplain_sampled_1500.csv"
+    HUMAN_DATA_PATH = PROJECT_ROOT / "data" / "measuringhatespeech" / "hatexplain_sampled_1500.csv"
+    # RESULTS_PATH = PROJECT_ROOT / "data" / "hatexplain" / "results_ollama_runs.jsonl"
+    RESULTS_PATH = PROJECT_ROOT / "data" / "measuringhatespeech" / "results_ollama_runs_mhs.jsonl"
 
     human_df = pd.read_csv(HUMAN_DATA_PATH)
     results_df = load_jsonl(RESULTS_PATH)
@@ -107,6 +120,12 @@ if __name__ == "__main__":
     print("\nExample seed outputs:")
     print(llm_entropy_df[["query_id", "model", "persona", "seed_outputs", "llm_label_counts", "llm_entropy"]].head(10))
 
+    # Calculate Variation Ratio and the Binary Instability flag
+    llm_entropy_df["llm_vr"] = llm_entropy_df["llm_label_counts"].apply(
+        calculate_variation_ratio
+    )
+    llm_entropy_df["is_unstable"] = (llm_entropy_df["llm_vr"] > 0).astype(int)
+
     ########################
     # Keep only complete 5-seed groups
 
@@ -154,120 +173,244 @@ if __name__ == "__main__":
         analysis_df["persona"] == "no_persona"
         ].copy()
 
-    print("\nBaseline dataframe:")
-    print(baseline_df.shape)
+    bin_order = [
+        AgreementBin.HIGH_AGREEMENT,
+        AgreementBin.MODERATE_DISAGREEMENT,
+        AgreementBin.HIGH_DISAGREEMENT
+    ]
 
-    print("\nBaseline rows per model:")
-    print(baseline_df["model"].value_counts())
+    baseline_df["stability_bins"] = pd.Categorical(
+        baseline_df["stability_bins"],
+        categories=bin_order,
+        ordered=True,
+    )
 
-    print("\nBaseline rows per human bin:")
-    print(baseline_df["stability_bins"].value_counts())
+    print("\nBaseline dataframe ready for analysis:")
+    print(baseline_df[["query_id", "model", "stability_bins", "llm_entropy", "llm_vr", "is_unstable"]].head())
 
-    ###########################################################
+    #####################################################################
+    # STEP 2: PREDICTIVE ML ANALYSIS (LLM Instability as a Subjectivity Detector)
+    #####################################################################
+
+    print("\n" + "=" * 60)
+    print("STEP 2: PREDICTIVE ML ANALYSIS (LLM Instability as Proxy)")
+    print("=" * 60)
+
+    # Define our Ground Truth Target (y_true):
+    # 1 = Humans disagreed (Moderate or High Disagreement)
+    # 0 = Humans were unanimous (High Agreement)
+    baseline_df["target_human_disagreement"] = (
+            baseline_df["stability_bins"] != AgreementBin.HIGH_AGREEMENT
+    ).astype(int)
 
     for model_name, model_df in baseline_df.groupby("model"):
-        fig, ax = plt.subplots(figsize=(8, 5))
+        # ground truth
+        y_true = model_df["target_human_disagreement"]
 
-        high_agreement = model_df[
-            model_df["stability_bins"] == AgreementBin.HIGH_AGREEMENT
-            ]["llm_entropy"]
+        # the "Confidence Score" for AUC metrics (Variation Ratio)
+        y_score = model_df["llm_vr"]
 
-        high_disagreement = model_df[
-            model_df["stability_bins"] == AgreementBin.HIGH_DISAGREEMENT
-            ]["llm_entropy"]
+        # the Hard Prediction (If LLM flutters at all -> Predict 1)
+        y_pred = model_df["is_unstable"]
 
-        ax.hist(high_agreement, alpha=0.6, label="high agreement")
-        ax.hist(high_disagreement, alpha=0.6, label="high disagreement")
+        # --- Calculate Metrics ---
+        # ROC-AUC measures how well VR ranks texts from least to most subjective
+        roc_auc = roc_auc_score(y_true, y_score)
 
-        ax.set_title(f"LLM entropy distribution: {model_name}")
-        ax.set_xlabel("LLM entropy across seeds")
-        ax.set_ylabel("Count")
-        ax.legend()
+        # PR-AUC is often better than ROC when classes might be imbalanced
+        pr_auc = average_precision_score(y_true, y_score)
 
+        # Precision/Recall using the strict "VR > 0" threshold
+        precision = precision_score(y_true, y_pred, zero_division=0)
+        recall = recall_score(y_true, y_pred, zero_division=0)
+
+        print(f"\n--- Model: {model_name} ---")
+        print(f"ROC-AUC: {roc_auc:.3f} (Random Baseline = 0.500)")
+        print(f"PR-AUC:  {pr_auc:.3f}")
+        print(f"Threshold: 'is_unstable == 1' (Any deviation across 5 seeds)")
+        print(f"  -> Precision: {precision:.3f}  | (If LLM fluttered, how often was it actually subjective?)")
+        print(f"  -> Recall:    {recall:.3f}  | (Out of all subjective texts, how many did the LLM catch?)")
+
+    #####################################################################
+    # STEP 2b: VISUALIZING THE PREDICTIVE POWER (ROC & PR CURVES)
+    #####################################################################
+
+    # Set up a 1x2 figure (ROC on the left, PR on the right)
+    fig, (ax_roc, ax_pr) = plt.subplots(1, 2, figsize=(14, 6))
+
+    # Calculate baseline for PR Curve (proportion of positive class)
+    no_skill_pr = baseline_df["target_human_disagreement"].mean()
+
+    for model_name, model_df in baseline_df.groupby("model"):
+        y_true = model_df["target_human_disagreement"]
+        y_score = model_df["llm_vr"]
+
+        # --- Plot ROC Curve ---
+        fpr, tpr, _ = roc_curve(y_true, y_score)
+        roc_auc = roc_auc_score(y_true, y_score)
+        ax_roc.plot(fpr, tpr, lw=2, label=f"{model_name} (AUC = {roc_auc:.2f})")
+
+        # --- Plot PR Curve ---
+        precision_vals, recall_vals, _ = precision_recall_curve(y_true, y_score)
+        pr_auc = average_precision_score(y_true, y_score)
+        ax_pr.plot(recall_vals, precision_vals, lw=2, label=f"{model_name} (AUC = {pr_auc:.2f})")
+
+    # --- Formatting ROC ---
+    ax_roc.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label="Random Guess")
+    ax_roc.set_xlim([0.0, 1.0])
+    ax_roc.set_ylim([0.0, 1.05])
+    ax_roc.set_xlabel('False Positive Rate (Unanimous text incorrectly flagged)')
+    ax_roc.set_ylabel('True Positive Rate (Subjective text correctly flagged)')
+    ax_roc.set_title('ROC Curve: Predicting Human Disagreement')
+    ax_roc.legend(loc="lower right")
+    ax_roc.grid(True, alpha=0.3)
+
+    # --- Formatting PR ---
+    ax_pr.plot([0, 1], [no_skill_pr, no_skill_pr], color='navy', lw=2, linestyle='--',
+               label=f"Random Guess ({no_skill_pr:.2f})")
+    ax_pr.set_xlim([0.0, 1.0])
+    ax_pr.set_ylim([0.0, 1.05])
+    ax_pr.set_xlabel('Recall (Out of all subjective texts, how many found?)')
+    ax_pr.set_ylabel('Precision (If flagged, how likely is it truly subjective?)')
+    ax_pr.set_title('Precision-Recall Curve')
+    ax_pr.legend(loc="upper right")
+    ax_pr.grid(True, alpha=0.3)
+
+    plt.suptitle("LLM Instability (Variation Ratio) as a Detector for Human Disagreement", fontsize=14)
+    plt.tight_layout()
+    plt.show()
+
+    #####################################################################
+    # STEP 3: STATISTICAL PROOFS (Ordinal Trend & Bootstrapped Correlation)
+    #####################################################################
+
+    print("\n" + "=" * 60)
+    print("STEP 3: STATISTICAL PROOFS (Spearman Trend & Bootstrapped Correlation)")
+    print("=" * 60)
+
+    # Number of bootstrap iterations for Confidence Intervals
+    N_BOOTSTRAPS = 1000
+
+    # Map the categorical bins to ordinal integers for the trend test
+    bin_mapping = {
+        AgreementBin.HIGH_AGREEMENT: 0,
+        AgreementBin.MODERATE_DISAGREEMENT: 1,
+        AgreementBin.HIGH_DISAGREEMENT: 2
+    }
+
+    for model_name, model_df in baseline_df.groupby("model"):
+        print(f"\n--- Model: {model_name} ---")
+
+        # ---------------------------------------------------------
+        # A. Spearman Trend Test (Ordinal Bins vs LLM Entropy)
+        # ---------------------------------------------------------
+        # Convert categorical bins to [0, 1, 2]
+        ordinal_bins = model_df["stability_bins"].map(bin_mapping).values
+        llm_ent = model_df["llm_entropy"].values
+
+        trend_rho, trend_p = spearmanr(ordinal_bins, llm_ent)
+
+        print("1. Ordinal Trend Test (Across 3 Human Bins):")
+        print(f"   Spearman rho: {trend_rho:.3f}")
+        print(f"   p-value:      {trend_p:.4e}")
+        if trend_p < 0.05 and trend_rho > 0:
+            print("   -> Significant upward trend: LLM entropy increases as Human disagreement increases.")
+
+        # ---------------------------------------------------------
+        # B. Bootstrapped Spearman Correlation (Continuous vs Continuous)
+        # ---------------------------------------------------------
+        human_ent = model_df["shannon_entropy"].values
+
+        # Base Spearman correlation
+        base_rho, base_p = spearmanr(human_ent, llm_ent)
+
+        # Bootstrapping loop to handle the "5-seed tied data" problem
+        boot_rhos = []
+        for _ in range(N_BOOTSTRAPS):
+            # Sample indices with replacement
+            idx = np.random.randint(0, len(model_df), len(model_df))
+            rho, _ = spearmanr(human_ent[idx], llm_ent[idx])
+            boot_rhos.append(rho)
+
+        # 95% Confidence Interval
+        ci_lower = np.percentile(boot_rhos, 2.5)
+        ci_upper = np.percentile(boot_rhos, 97.5)
+
+        print("\n2. Bootstrapped Spearman Correlation (Human Entropy vs LLM Entropy):")
+        print(f"   Spearman rho: {base_rho:.3f}")
+        print(f"   95% CI:       [{ci_lower:.3f}, {ci_upper:.3f}]")
+
+        if ci_lower > 0:
+            print("   -> Robust positive correlation (CI does not cross zero).")
+        else:
+            print("   -> Correlation is NOT statistically robust.")
+
+    #####################################################################
+    # STEP 4: VISUAL PROOF & QUALITATIVE MISMATCH EXTRACTION
+    #####################################################################
+
+    print("\n" + "=" * 60)
+    print("STEP 4: QUALITATIVE MISMATCH EXTRACTION")
+    print("=" * 60)
+
+    # ---------------------------------------------------------
+    # A. The Stacked Bar Chart (Visualizing the Trend)
+    # ---------------------------------------------------------
+    # We will plot this for the first model in your list as an example,
+    # but you can loop this for all models if you want.
+
+    for model_name, model_df in baseline_df.groupby("model"):
+        # Create a cross-tabulation of Human Bins vs LLM Variation Ratios
+        crosstab = pd.crosstab(
+            model_df["stability_bins"],
+            model_df["llm_vr"],
+            normalize='index'  # This turns counts into percentages (0.0 to 1.0)
+        ) * 100
+
+        # Plotting
+        fig, ax = plt.subplots(figsize=(8, 6))
+
+        # A nice color palette: Green for Stable (0.0), shifting to Reds for highly unstable
+        cmap = sns.color_palette("RdYlGn_r", n_colors=len(crosstab.columns))
+
+        crosstab.plot(kind='bar', stacked=True, color=cmap, ax=ax, edgecolor='black')
+
+        ax.set_title(f"LLM Output Stability across Human Disagreement ({model_name})", fontsize=14)
+        ax.set_xlabel("Human Agreement Bin", fontsize=12)
+        ax.set_ylabel("Percentage of Queries (%)", fontsize=12)
+        ax.yaxis.set_major_formatter(mtick.PercentFormatter())
+
+        # Clean up the legend
+        plt.legend(title="LLM Variation Ratio\n(0.0 = Unanimous)", bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.xticks(rotation=0)
         plt.tight_layout()
         plt.show()
 
-    ########################
-    # RQ2: Do high-disagreement samples produce more variable LLM outputs?
+        # ---------------------------------------------------------
+        # B. Qualitative Analysis: Finding the Mismatches
+        # ---------------------------------------------------------
+        print(f"\n--- Mismatches for {model_name} ---")
 
-    print("\nRQ2: Method selection based on normality")
+        # Mismatch Type 1: Overconfident Model
+        # Humans had HIGH disagreement, but the model was UNANIMOUS (VR = 0)
+        overconfident = model_df[
+            (model_df["stability_bins"] == AgreementBin.HIGH_DISAGREEMENT) &
+            (model_df["llm_vr"] == 0.0)
+            ]
 
-    for model_name, model_df in baseline_df.groupby("model"):
-        high_agreement = model_df[
-            model_df["stability_bins"] == AgreementBin.HIGH_AGREEMENT
-            ]["llm_entropy"]
+        # Mismatch Type 2: Overly Sensitive/Noisy Model
+        # Humans had HIGH agreement, but the model FLUTTERED (VR > 0)
+        noisy = model_df[
+            (model_df["stability_bins"] == AgreementBin.HIGH_AGREEMENT) &
+            (model_df["llm_vr"] > 0.0)
+            ]
 
-        high_disagreement = model_df[
-            model_df["stability_bins"] == AgreementBin.HIGH_DISAGREEMENT
-            ]["llm_entropy"]
+        print(f"1. Overconfident LLM (High Human Disag, Stable LLM): {len(overconfident)} queries found.")
+        if len(overconfident) > 0:
+            sample_queries = overconfident["query_id"].head(3).tolist()
+            print(f"   Look up these query_ids to analyze: {sample_queries}")
 
-        print("\nModel:", model_name)
-        print("N high agreement:", len(high_agreement))
-        print("N high disagreement:", len(high_disagreement))
-
-        print("Mean LLM entropy, high agreement:", high_agreement.mean())
-        print("Mean LLM entropy, high disagreement:", high_disagreement.mean())
-        print("Median LLM entropy, high agreement:", high_agreement.median())
-        print("Median LLM entropy, high disagreement:", high_disagreement.median())
-
-        # Shapiro-Wilk normality tests
-        shapiro_high_agreement = shapiro(high_agreement)
-        shapiro_high_disagreement = shapiro(high_disagreement)
-
-        print("Shapiro high agreement p-value:", shapiro_high_agreement.pvalue)
-        print("Shapiro high disagreement p-value:", shapiro_high_disagreement.pvalue)
-
-        normal_high_agreement = shapiro_high_agreement.pvalue > 0.05
-        normal_high_disagreement = shapiro_high_disagreement.pvalue > 0.05
-
-        both_normal = normal_high_agreement and normal_high_disagreement
-
-        if both_normal:
-            levene_result = levene(high_agreement, high_disagreement)
-            equal_variance = levene_result.pvalue > 0.05
-
-            t_stat, p_value = ttest_ind(
-                high_agreement,
-                high_disagreement,
-                equal_var=equal_variance,
-            )
-
-            print("Levene p-value:", levene_result.pvalue)
-            print("Selected test:", "independent t-test" if equal_variance else "Welch t-test")
-            print("t statistic:", t_stat)
-            print("p-value:", p_value)
-
-        else:
-            u_stat, p_value = mannwhitneyu(
-                high_agreement,
-                high_disagreement,
-                alternative="two-sided",
-            )
-
-            print("Selected test: Mann-Whitney U")
-            print("Mann-Whitney U:", u_stat)
-            print("p-value:", p_value)
-
-    ########################
-    # TODO Optional: Kruskal-Wallis across all three human agreement bins
-    # do we need?
-    # if so, you need to account for possible normality
-    # and use anova if suitable
-
-    print("\nOptional: Kruskal-Wallis across all three bins")
-
-    for model_name, model_df in baseline_df.groupby("model"):
-        groups = [
-            group["llm_entropy"]
-            for _, group in model_df.groupby("stability_bins")
-        ]
-
-        stat, p_value = kruskal(*groups)
-
-        print("\nModel:", model_name)
-        print("Kruskal-Wallis H:", stat)
-        print("p-value:", p_value)
-
-
-
-
+        print(f"2. Noisy LLM (High Human Ag, Unstable LLM): {len(noisy)} queries found.")
+        if len(noisy) > 0:
+            sample_queries = noisy["query_id"].head(3).tolist()
+            print(f"   Look up these query_ids to analyze: {sample_queries}")
