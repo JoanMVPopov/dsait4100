@@ -1,13 +1,23 @@
+import ast
 import json
 from collections import Counter
+from enum import StrEnum
 from pathlib import Path
 
 import pandas as pd
-from scipy.stats import spearmanr
+from matplotlib import pyplot as plt
+from sklearn.metrics import roc_auc_score, precision_score, recall_score, average_precision_score, roc_curve, \
+    precision_recall_curve
 
 from data.hatexplain.preprocess_hatexplain import VALID_LABEL_VALUES, calculate_shannon_entropy, AgreementBin
-import matplotlib.pyplot as plt
+from scipy.stats import spearmanr
+import numpy as np
+import seaborn as sns
+import matplotlib.ticker as mtick
 
+class DatasetName(StrEnum):
+    HATEXPLAIN = "hatexplain"
+    MHS = "mhs"
 
 def load_jsonl(path):
     rows = []
@@ -18,12 +28,15 @@ def load_jsonl(path):
 
     return pd.DataFrame(rows)
 
-if __name__ == "__main__":
-    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+def calculate_variation_ratio(label_counts):
+    if not label_counts:
+        return 0.0
+    total_votes = sum(label_counts.values())
+    max_votes = max(label_counts.values())
+    return round(1.0 - (max_votes / total_votes), 2)
 
-    HUMAN_DATA_PATH = PROJECT_ROOT / "data" / "hatexplain" / "hatexplain_sampled_1500.csv"
-    RESULTS_PATH = PROJECT_ROOT / "data" / "hatexplain" / "results_ollama_runs.jsonl"
-
+def analyze_dataset(dataset_name: DatasetName,
+                    HUMAN_DATA_PATH: Path, RESULTS_PATH: Path):
     human_df = pd.read_csv(HUMAN_DATA_PATH)
     results_df = load_jsonl(RESULTS_PATH)
 
@@ -37,7 +50,34 @@ if __name__ == "__main__":
     print(results_df.columns)
     print(results_df.head())
 
-    human_df = human_df.rename(columns={"post_id": "query_id"})
+    if dataset_name == DatasetName.HATEXPLAIN:
+        human_df = human_df.rename(columns={"post_id": "query_id"})
+    elif dataset_name == DatasetName.MHS:
+        human_df = human_df.rename(columns={
+            "entropy": "shannon_entropy",
+            "disagreement_bin": "stability_bins",
+            "hatespeech_labels": "annotator_labels"
+        })
+
+        # map MHS bin names to the expected AgreementBin enum names
+        bin_mapping = {
+            "low_disagreement": AgreementBin.HIGH_AGREEMENT.value,
+            "medium_disagreement": AgreementBin.MODERATE_DISAGREEMENT.value,
+            "high_disagreement": AgreementBin.HIGH_DISAGREEMENT.value
+        }
+        human_df["stability_bins"] = human_df["stability_bins"].map(bin_mapping).fillna(human_df["stability_bins"])
+
+        # create the 'label_counts' dictionary so the downstream merge doesn't crash
+        def get_counts(label_str):
+            try:
+                # Converts string "[0.0, 2.0, 1.0]" into a list, then counts them
+                return dict(Counter(ast.literal_eval(label_str)))
+            except:
+                return {}
+
+        human_df["label_counts"] = human_df["annotator_labels"].apply(get_counts)
+    else:
+        raise ValueError("Unsupported dataset")
 
     human_df["query_id"] = human_df["query_id"].astype(str)
     results_df["query_id"] = results_df["query_id"].astype(str)
@@ -107,6 +147,12 @@ if __name__ == "__main__":
     print("\nExample seed outputs:")
     print(llm_entropy_df[["query_id", "model", "persona", "seed_outputs", "llm_label_counts", "llm_entropy"]].head(10))
 
+    # Calculate Variation Ratio and the Binary Instability flag
+    llm_entropy_df["llm_vr"] = llm_entropy_df["llm_label_counts"].apply(
+        calculate_variation_ratio
+    )
+    llm_entropy_df["is_unstable"] = (llm_entropy_df["llm_vr"] > 0).astype(int)
+
     ########################
     # Keep only complete 5-seed groups
 
@@ -148,49 +194,11 @@ if __name__ == "__main__":
     print(analysis_df["shannon_entropy"].isna().sum())
 
     ########################
-    # RQ1 uses only the raw baseline condition
+    # RQ1 and RQ2 use only the raw baseline condition
 
     baseline_df = analysis_df[
         analysis_df["persona"] == "no_persona"
         ].copy()
-
-    print("\nBaseline dataframe:")
-    print(baseline_df.shape)
-
-    pd.set_option('display.max_columns', None)
-    print(baseline_df.head())
-
-    print("\nBaseline rows per model:")
-    print(baseline_df["model"].value_counts())
-
-    print("\nBaseline rows per human bin:")
-    print(baseline_df["stability_bins"].value_counts())
-
-    ########################
-    # RQ1: Correlation between human disagreement and LLM variability
-
-    print("\nRQ1: Spearman correlation between human entropy and LLM entropy")
-
-    # Intra-model variability
-    # group by model, look at the entropy (derived from grouping by seed earlier) for each query
-    for model_name, model_df in baseline_df.groupby("model"):
-        rho, p_value = spearmanr(
-            model_df["shannon_entropy"],
-            model_df["llm_entropy"],
-        )
-
-        print("\nModel:", model_name)
-        print("N:", len(model_df))
-        print("Spearman rho:", rho)
-        print("p-value:", p_value)
-
-    ##################################################################
-    # BOXPLOT 1
-    # TODO: This might be optional, determine
-    # Overall, do higher human-disagreement bins show higher LLM variability?
-    # x-axis: high_agreement, moderate_disagreement, high_disagreement
-    # y-axis: LLM entropy across the 5 seeds
-    # data: all models pooled together
 
     bin_order = [
         AgreementBin.HIGH_AGREEMENT,
@@ -204,73 +212,256 @@ if __name__ == "__main__":
         ordered=True,
     )
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    print("\nBaseline dataframe ready for analysis:")
+    print(baseline_df[["query_id", "model", "stability_bins", "llm_entropy", "llm_vr", "is_unstable"]].head())
 
-    baseline_df.boxplot(
-        column="llm_entropy",
-        by="stability_bins",
-        ax=ax,
-        grid=False,
-    )
+    #####################################################################
+    # STEP 2: PREDICTIVE ML ANALYSIS (LLM Instability as a Subjectivity Detector)
+    #####################################################################
 
-    ax.set_title("LLM output variability by human agreement bin")
-    ax.set_xlabel("Human agreement bin")
-    ax.set_ylabel("LLM entropy across seeds")
+    print("\n" + "=" * 60)
+    print("STEP 2: PREDICTIVE ML ANALYSIS (LLM Instability as Proxy)")
+    print("=" * 60)
 
-    plt.suptitle("")
+    # Define our Ground Truth Target (y_true):
+    # 1 = Humans disagreed (Moderate or High Disagreement)
+    # 0 = Humans were unanimous (High Agreement)
+    baseline_df["target_human_disagreement"] = (
+            baseline_df["stability_bins"] != AgreementBin.HIGH_AGREEMENT
+    ).astype(int)
+
+    for model_name, model_df in baseline_df.groupby("model"):
+        # ground truth
+        y_true = model_df["target_human_disagreement"]
+
+        # the "Confidence Score" for AUC metrics (Variation Ratio)
+        y_score = model_df["llm_vr"]
+
+        # the Hard Prediction (If LLM flutters at all -> Predict 1)
+        y_pred = model_df["is_unstable"]
+
+        # --- Calculate Metrics ---
+        # ROC-AUC measures how well VR ranks texts from least to most subjective
+        roc_auc = roc_auc_score(y_true, y_score)
+
+        # PR-AUC is often better than ROC when classes might be imbalanced
+        pr_auc = average_precision_score(y_true, y_score)
+
+        # Precision/Recall using the strict "VR > 0" threshold
+        precision = precision_score(y_true, y_pred, zero_division=0)
+        recall = recall_score(y_true, y_pred, zero_division=0)
+
+        print(f"\n--- Model: {model_name} ---")
+        print(f"ROC-AUC: {roc_auc:.3f} (Random Baseline = 0.500)")
+        print(f"PR-AUC:  {pr_auc:.3f}")
+        print(f"Threshold: 'is_unstable == 1' (Any deviation across 5 seeds)")
+        print(f"  -> Precision: {precision:.3f}  | (If LLM fluttered, how often was it actually subjective?)")
+        print(f"  -> Recall:    {recall:.3f}  | (Out of all subjective texts, how many did the LLM catch?)")
+
+    #####################################################################
+    # STEP 2b: VISUALIZING THE PREDICTIVE POWER (ROC & PR CURVES)
+    #####################################################################
+
+    # Set up a 1x2 figure (ROC on the left, PR on the right)
+    fig, (ax_roc, ax_pr) = plt.subplots(1, 2, figsize=(14, 6))
+
+    # Calculate baseline for PR Curve (proportion of positive class)
+    no_skill_pr = baseline_df["target_human_disagreement"].mean()
+
+    for model_name, model_df in baseline_df.groupby("model"):
+        y_true = model_df["target_human_disagreement"]
+        y_score = model_df["llm_vr"]
+
+        # --- Plot ROC Curve ---
+        fpr, tpr, _ = roc_curve(y_true, y_score)
+        roc_auc = roc_auc_score(y_true, y_score)
+        ax_roc.plot(fpr, tpr, lw=2, label=f"{model_name} (AUC = {roc_auc:.2f})")
+
+        # --- Plot PR Curve ---
+        precision_vals, recall_vals, _ = precision_recall_curve(y_true, y_score)
+        pr_auc = average_precision_score(y_true, y_score)
+        ax_pr.plot(recall_vals, precision_vals, lw=2, label=f"{model_name} (AUC = {pr_auc:.2f})")
+
+    # --- Formatting ROC ---
+    ax_roc.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label="Random Guess")
+    ax_roc.set_xlim([0.0, 1.0])
+    ax_roc.set_ylim([0.0, 1.05])
+    ax_roc.set_xlabel('False Positive Rate (Unanimous text incorrectly flagged)')
+    ax_roc.set_ylabel('True Positive Rate (Subjective text correctly flagged)')
+    ax_roc.set_title('ROC Curve: Predicting Human Disagreement')
+    ax_roc.legend(loc="lower right")
+    ax_roc.grid(True, alpha=0.3)
+
+    # --- Formatting PR ---
+    ax_pr.plot([0, 1], [no_skill_pr, no_skill_pr], color='navy', lw=2, linestyle='--',
+               label=f"Random Guess ({no_skill_pr:.2f})")
+    ax_pr.set_xlim([0.0, 1.0])
+    ax_pr.set_ylim([0.0, 1.05])
+    ax_pr.set_xlabel('Recall (Out of all subjective texts, how many found?)')
+    ax_pr.set_ylabel('Precision (If flagged, how likely is it truly subjective?)')
+    ax_pr.set_title('Precision-Recall Curve')
+    ax_pr.legend(loc="upper right")
+    ax_pr.grid(True, alpha=0.3)
+
+    plt.suptitle("LLM Instability (Variation Ratio) as a Detector for Human Disagreement", fontsize=14)
     plt.tight_layout()
+    plt.savefig(PLOTS_PATH / f"roc-pr-auc_{dataset_name}.png")
     plt.show()
 
     #####################################################################
-    # BOXPLOT 2
-    # Does this pattern differ between Qwen, Llama, and DeepSeek-R1?
+    # STEP 3: STATISTICAL PROOFS (Ordinal Trend & Bootstrapped Correlation)
+    #####################################################################
 
-    fig, axes = plt.subplots(
-        1,
-        len(baseline_df["model"].unique()),
-        figsize=(15, 5),
-        sharey=True,
-    )
+    print("\n" + "=" * 60)
+    print("STEP 3: STATISTICAL PROOFS (Spearman Trend & Bootstrapped Correlation)")
+    print("=" * 60)
 
-    for ax, (model_name, model_df) in zip(axes, baseline_df.groupby("model")):
-        model_df.boxplot(
-            column="llm_entropy",
-            by="stability_bins",
-            ax=ax,
-            grid=False,
-        )
+    # Number of bootstrap iterations for Confidence Intervals
+    N_BOOTSTRAPS = 1000
 
-        ax.set_title(model_name)
-        ax.set_xlabel("Human agreement bin")
-        ax.set_ylabel("LLM entropy across seeds")
+    # Map the categorical bins to ordinal integers for the trend test
+    bin_mapping = {
+        AgreementBin.HIGH_AGREEMENT: 0,
+        AgreementBin.MODERATE_DISAGREEMENT: 1,
+        AgreementBin.HIGH_DISAGREEMENT: 2
+    }
 
-    plt.suptitle("")
-    plt.tight_layout()
-    plt.show()
+    for model_name, model_df in baseline_df.groupby("model"):
+        print(f"\n--- Model: {model_name} ---")
 
-    #################################
+        # ---------------------------------------------------------
+        # A. Spearman Trend Test (Ordinal Bins vs LLM Entropy)
+        # ---------------------------------------------------------
+        # Convert categorical bins to [0, 1, 2]
+        ordinal_bins = model_df["stability_bins"].map(bin_mapping).values
+        llm_ent = model_df["llm_entropy"].values
 
-    # TODO: OPTIONAL, determine if needed
-    # Scatter plot of human entropy vs LLM entropy, per model
+        trend_rho, trend_p = spearmanr(ordinal_bins, llm_ent)
 
-    fig, axes = plt.subplots(
-        1,
-        len(baseline_df["model"].unique()),
-        figsize=(15, 5),
-        sharey=True,
-    )
+        print("1. Ordinal Trend Test (Across 3 Human Bins):")
+        print(f"   Spearman rho: {trend_rho:.3f}")
+        print(f"   p-value:      {trend_p:.4e}")
+        if trend_p < 0.05 and trend_rho > 0:
+            print("   -> Significant upward trend: LLM entropy increases as Human disagreement increases.")
 
-    for ax, (model_name, model_df) in zip(axes, baseline_df.groupby("model")):
-        ax.scatter(
-            model_df["shannon_entropy"],
-            model_df["llm_entropy"],
-            alpha=0.7,
-        )
+        # ---------------------------------------------------------
+        # B. Bootstrapped Spearman Correlation (Continuous vs Continuous)
+        # ---------------------------------------------------------
+        human_ent = model_df["shannon_entropy"].values
 
-        ax.set_title(model_name)
-        ax.set_xlabel("Human entropy")
-        ax.set_ylabel("LLM entropy across seeds")
+        # Base Spearman correlation
+        base_rho, base_p = spearmanr(human_ent, llm_ent)
 
-    plt.tight_layout()
-    plt.show()
+        # Bootstrapping loop to handle the "5-seed tied data" problem
+        boot_rhos = []
+        for _ in range(N_BOOTSTRAPS):
+            # Sample indices with replacement
+            idx = np.random.randint(0, len(model_df), len(model_df))
+            rho, _ = spearmanr(human_ent[idx], llm_ent[idx])
+            boot_rhos.append(rho)
+
+        # 95% Confidence Interval
+        ci_lower = np.percentile(boot_rhos, 2.5)
+        ci_upper = np.percentile(boot_rhos, 97.5)
+
+        print("\n2. Bootstrapped Spearman Correlation (Human Entropy vs LLM Entropy):")
+        print(f"   Spearman rho: {base_rho:.3f}")
+        print(f"   95% CI:       [{ci_lower:.3f}, {ci_upper:.3f}]")
+
+        if ci_lower > 0:
+            print("   -> Robust POSITIVE correlation (CI strictly > 0). Hypothesis supported!")
+        elif ci_upper < 0:
+            print("   -> Robust NEGATIVE correlation (CI strictly < 0). Significant, but contradicts hypothesis!")
+        else:
+            print("   -> Correlation is NOT statistically robust (CI crosses zero).")
+
+    #####################################################################
+    # STEP 4: VISUAL PROOF & QUALITATIVE MISMATCH EXTRACTION
+    #####################################################################
+
+    print("\n" + "=" * 60)
+    print("STEP 4: QUALITATIVE MISMATCH EXTRACTION")
+    print("=" * 60)
+
+    # ---------------------------------------------------------
+    # A. The Stacked Bar Chart (Visualizing the Trend)
+    # ---------------------------------------------------------
+    # We will plot this for the first model in your list as an example,
+    # but you can loop this for all models if you want.
+
+    for model_name, model_df in baseline_df.groupby("model"):
+        # Create a cross-tabulation of Human Bins vs LLM Variation Ratios
+        crosstab = pd.crosstab(
+            model_df["stability_bins"],
+            model_df["llm_vr"],
+            normalize='index'  # This turns counts into percentages (0.0 to 1.0)
+        ) * 100
+
+        # Plotting
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        # A nice color palette: Green for Stable (0.0), shifting to Reds for highly unstable
+        cmap = sns.color_palette("RdYlGn_r", n_colors=len(crosstab.columns))
+
+        crosstab.plot(kind='bar', stacked=True, color=cmap, ax=ax, edgecolor='black')
+
+        ax.set_title(f"LLM Output Stability across Human Disagreement ({model_name})", fontsize=14)
+        ax.set_xlabel("Human Agreement Bin", fontsize=12)
+        ax.set_ylabel("Percentage of Queries (%)", fontsize=12)
+        ax.yaxis.set_major_formatter(mtick.PercentFormatter())
+
+        # Clean up the legend
+        plt.legend(title="LLM Variation Ratio\n(0.0 = Unanimous)", bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.xticks(rotation=0)
+        plt.tight_layout()
+        safe_model_name = model_name.replace(":", "_").replace("/", "_")
+        plt.savefig(PLOTS_PATH / f"{safe_model_name}_{dataset_name}_stacked_bars_llm_vr.png")
+        plt.show()
+
+        # ---------------------------------------------------------
+        # B. Qualitative Analysis: Finding the Mismatches
+        # ---------------------------------------------------------
+        print(f"\n--- Mismatches for {model_name} ---")
+
+        # Mismatch Type 1: Overconfident Model
+        # Humans had HIGH disagreement, but the model was UNANIMOUS (VR = 0)
+        overconfident = model_df[
+            (model_df["stability_bins"] == AgreementBin.HIGH_DISAGREEMENT) &
+            (model_df["llm_vr"] == 0.0)
+            ]
+
+        # Mismatch Type 2: Overly Sensitive/Noisy Model
+        # Humans had HIGH agreement, but the model FLUTTERED (VR > 0)
+        noisy = model_df[
+            (model_df["stability_bins"] == AgreementBin.HIGH_AGREEMENT) &
+            (model_df["llm_vr"] > 0.0)
+            ]
+
+        print(f"1. Overconfident LLM (High Human Disag, Stable LLM): {len(overconfident)} queries found.")
+        if len(overconfident) > 0:
+            sample_queries = overconfident["query_id"].head(3).tolist()
+            print(f"   Look up these query_ids to analyze: {sample_queries}")
+
+        print(f"2. Noisy LLM (High Human Ag, Unstable LLM): {len(noisy)} queries found.")
+        if len(noisy) > 0:
+            sample_queries = noisy["query_id"].head(3).tolist()
+            print(f"   Look up these query_ids to analyze: {sample_queries}")
+
+
+if __name__ == "__main__":
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+    PLOTS_PATH = PROJECT_ROOT / "rq1" / "plots"
+    HUMAN_DATA_PATH_HATEX = PROJECT_ROOT / "data" / "hatexplain" / "hatexplain_sampled_1500.csv"
+    RESULTS_PATH_HATEX = PROJECT_ROOT / "data" / "hatexplain" / "results_ollama_runs.jsonl"
+    HUMAN_DATA_PATH_MHS = PROJECT_ROOT / "data" / "measuringhatespeech" / "mhs_global_entropy_bins_fixed_sampled.csv"
+    RESULTS_PATH_MHS = PROJECT_ROOT / "data" / "measuringhatespeech" / "results_ollama_runs_mhs.jsonl"
+
+    analyze_dataset(DatasetName.HATEXPLAIN,
+                    HUMAN_DATA_PATH_HATEX, RESULTS_PATH_HATEX)
+
+    analyze_dataset(DatasetName.MHS,
+                    HUMAN_DATA_PATH_MHS, RESULTS_PATH_MHS)
+
+
 

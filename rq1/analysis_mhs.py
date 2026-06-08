@@ -1,3 +1,4 @@
+import ast
 import json
 from collections import Counter
 from pathlib import Path
@@ -33,7 +34,7 @@ if __name__ == "__main__":
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
     # HUMAN_DATA_PATH = PROJECT_ROOT / "data" / "hatexplain" / "hatexplain_sampled_1500.csv"
-    HUMAN_DATA_PATH = PROJECT_ROOT / "data" / "measuringhatespeech" / "hatexplain_sampled_1500.csv"
+    HUMAN_DATA_PATH = PROJECT_ROOT / "data" / "measuringhatespeech" / "mhs_global_entropy_bins_fixed_sampled.csv"
     # RESULTS_PATH = PROJECT_ROOT / "data" / "hatexplain" / "results_ollama_runs.jsonl"
     RESULTS_PATH = PROJECT_ROOT / "data" / "measuringhatespeech" / "results_ollama_runs_mhs.jsonl"
 
@@ -50,7 +51,30 @@ if __name__ == "__main__":
     print(results_df.columns)
     print(results_df.head())
 
-    human_df = human_df.rename(columns={"post_id": "query_id"})
+    human_df = human_df.rename(columns={
+        "entropy": "shannon_entropy",
+        "disagreement_bin": "stability_bins",
+        "hatespeech_labels": "annotator_labels"
+    })
+
+    # map MHS bin names to the expected AgreementBin enum names
+    bin_mapping = {
+        "low_disagreement": AgreementBin.HIGH_AGREEMENT.value,
+        "medium_disagreement": AgreementBin.MODERATE_DISAGREEMENT.value,
+        "high_disagreement": AgreementBin.HIGH_DISAGREEMENT.value
+    }
+    human_df["stability_bins"] = human_df["stability_bins"].map(bin_mapping).fillna(human_df["stability_bins"])
+
+    # create the 'label_counts' dictionary so the downstream merge doesn't crash
+    def get_counts(label_str):
+        try:
+            # Converts string "[0.0, 2.0, 1.0]" into a list, then counts them
+            return dict(Counter(ast.literal_eval(label_str)))
+        except:
+            return {}
+
+
+    human_df["label_counts"] = human_df["annotator_labels"].apply(get_counts)
 
     human_df["query_id"] = human_df["query_id"].astype(str)
     results_df["query_id"] = results_df["query_id"].astype(str)
@@ -341,9 +365,11 @@ if __name__ == "__main__":
         print(f"   95% CI:       [{ci_lower:.3f}, {ci_upper:.3f}]")
 
         if ci_lower > 0:
-            print("   -> Robust positive correlation (CI does not cross zero).")
+            print("   -> Robust POSITIVE correlation (CI strictly > 0). Hypothesis supported!")
+        elif ci_upper < 0:
+            print("   -> Robust NEGATIVE correlation (CI strictly < 0). Significant, but contradicts hypothesis!")
         else:
-            print("   -> Correlation is NOT statistically robust.")
+            print("   -> Correlation is NOT statistically robust (CI crosses zero).")
 
     #####################################################################
     # STEP 4: VISUAL PROOF & QUALITATIVE MISMATCH EXTRACTION
