@@ -1,0 +1,4 @@
+model,high_agreement,high_disagreement,moderate_disagreement
+deepseek-r1:8b-0528-qwen3-q4_K_M,0.0,0.0008,0.0005
+llama3.1:8b-instruct-q4_K_M,0.0869,0.1553,0.1434
+qwen3.5:9b-q4_K_M,0.0,0.0,0.0
