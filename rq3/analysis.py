@@ -40,7 +40,6 @@ LABEL_TO_SCORE = {
 }
 
 
-
 def load_jsonl(path: Path) -> pd.DataFrame:
     rows = []
 
@@ -72,25 +71,21 @@ def normalize_persona(value):
 
 def clean_label(value):
     """
-    Robustly clean model outputs into:
+    Strictly parse model outputs into:
     normal / offensive / hatespeech.
 
-    This handles both exact labels and accidental verbose outputs.
+    To match the updated global RQ1/RQ2 analysis, only the first
+    whitespace-separated token is accepted as the label. This prevents
+    refusals or verbose explanations from being counted as valid labels
+    just because they mention one of the target labels later in the text.
     """
     if pd.isna(value):
         return np.nan
 
-    value = str(value).lower().strip()
+    tokens = str(value).lower().strip().split()
 
-    if value in VALID_LABEL_VALUES:
-        return value
-
-    if "hatespeech" in value or "hate speech" in value:
-        return "hatespeech"
-    if "offensive" in value:
-        return "offensive"
-    if "normal" in value:
-        return "normal"
+    if tokens and tokens[0] in VALID_LABEL_VALUES:
+        return tokens[0]
 
     return np.nan
 
@@ -123,7 +118,7 @@ def variation_ratio_from_labels(labels):
         return np.nan
 
     counts = labels.value_counts()
-    return float(1.0 - counts.max() / counts.sum())
+    return round(float(1.0 - counts.max() / counts.sum()), 2)
 
 
 def safe_spearman(x, y):
@@ -208,7 +203,6 @@ def safe_auc_metrics(y_true, y_score, y_pred):
     }
 
 
-
 def analyze_mhs_persona_dataset(
     HUMAN_DATA_PATH: Path,
     RESULTS_PATH: Path,
@@ -216,31 +210,13 @@ def analyze_mhs_persona_dataset(
     required_n_seeds: int = 5,
     n_bootstraps: int = 1000,
 ):
-    """
-    Persona-level RQ3 analysis.
-
-    Correct logic:
-    1. The same query_id is run for all LLM personas.
-    2. LLM outputs are collapsed across seeds per:
-       query_id x model x llm_persona.
-    3. Human disagreement is already computed per:
-       query_id x ideology_group.
-    4. The comparison keeps only matched persona rows:
-       llm_persona == human_persona.
-
-    Therefore:
-       conservative LLM persona -> conservative human annotator subgroup
-       liberal LLM persona      -> liberal human annotator subgroup
-       neutral LLM persona      -> neutral human annotator subgroup
-    """
 
     OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
     PLOTS_PATH = OUTPUT_PATH / "plots"
     TABLES_PATH = OUTPUT_PATH / "tables"
 
-    PLOTS_PATH.mkdir(exist_ok=True)
-    TABLES_PATH.mkdir(exist_ok=True)
-
+    PLOTS_PATH.mkdir(parents=True, exist_ok=True)
+    TABLES_PATH.mkdir(parents=True, exist_ok=True)
 
     human_df = pd.read_csv(HUMAN_DATA_PATH)
     results_df = load_jsonl(RESULTS_PATH)
@@ -258,7 +234,6 @@ def analyze_mhs_persona_dataset(
     print(results_df.shape)
     print(results_df.columns.tolist())
     print(results_df.head())
-
 
     human_df = human_df.rename(
         columns={
@@ -303,7 +278,6 @@ def analyze_mhs_persona_dataset(
         .unstack(fill_value=0)
     )
 
-
     results_df["query_id"] = results_df["query_id"].astype(str)
     results_df["llm_persona"] = results_df["persona"].apply(normalize_persona)
     results_df["label_clean"] = results_df["raw_output"].apply(clean_label)
@@ -321,6 +295,43 @@ def analyze_mhs_persona_dataset(
                 ["query_id", "model", "persona", "seed", "raw_output"]
             ].head(20)
         )
+
+    # ------------------------------------------------------------
+    # Non-compliance audit
+    # ------------------------------------------------------------
+    # A generation is non-compliant when it fails strict first-token
+    # label parsing. We compute this by matched model/persona/bin so
+    # that refusals or verbose outputs are visible in the persona setup.
+    noncomp_df = results_df.assign(noncompliant=invalid_mask).copy()
+
+    noncomp_matched = noncomp_df.merge(
+        human_df[["query_id", "human_persona", "human_disagreement_bin"]],
+        left_on=["query_id", "llm_persona"],
+        right_on=["query_id", "human_persona"],
+        how="inner",
+    )
+
+    noncomp_table = (
+        noncomp_matched
+        .groupby(["model", "llm_persona", "human_disagreement_bin"])["noncompliant"]
+        .mean()
+        .unstack(fill_value=0.0)
+    )
+
+    print("\nPersona non-compliance rate per model/persona/bin:")
+    print(noncomp_table.to_string())
+    noncomp_table.to_csv(TABLES_PATH / "persona_noncompliance_by_bin.csv")
+
+    print("\nAudit of non-compliant outputs (top distinct patterns):")
+    print(
+        results_df.loc[invalid_mask, "raw_output"]
+        .astype(str)
+        .str.lower()
+        .str.strip()
+        .str[:80]
+        .value_counts()
+        .head(20)
+    )
 
     valid_results_df = results_df[
         (~invalid_mask) &
@@ -340,7 +351,6 @@ def analyze_mhs_persona_dataset(
     )
 
     print("\nValid LLM rows after cleaning/deduplication:", valid_results_df.shape)
-
 
     llm_df = (
         valid_results_df
@@ -429,7 +439,6 @@ def analyze_mhs_persona_dataset(
     analysis_df.to_csv(OUTPUT_PATH / "persona_matched_analysis_full.csv", index=False)
     llm_df.to_csv(OUTPUT_PATH / "persona_llm_entropy_by_query_model_persona.csv", index=False)
 
-
     corr_rows = []
 
     for (model_name, persona_name), model_df in analysis_df.groupby(["model", "llm_persona"]):
@@ -491,7 +500,6 @@ def analyze_mhs_persona_dataset(
         index=False,
         float_format="%.3f",
     )
-
 
     boot_rows = []
 
@@ -567,7 +575,6 @@ def analyze_mhs_persona_dataset(
         float_format="%.3f",
     )
 
-
     bin_test_rows = []
 
     for (model_name, persona_name), model_df in analysis_df.groupby(["model", "llm_persona"]):
@@ -632,7 +639,6 @@ def analyze_mhs_persona_dataset(
         float_format="%.3f",
     )
 
-
     predictive_rows = []
 
     for (model_name, persona_name), model_df in analysis_df.groupby(["model", "llm_persona"]):
@@ -663,8 +669,72 @@ def analyze_mhs_persona_dataset(
     print(predictive_df.round(4))
 
     predictive_df.to_csv(TABLES_PATH / "persona_predictive_metrics.csv", index=False)
-    predictive_df.to_latex(
-        TABLES_PATH / "persona_predictive_metrics.tex",
+
+    persona_summary = (
+        boot_df[["model", "persona", "n", "rho", "ci_low", "ci_high", "ci_excludes_zero"]]
+        .merge(
+            corr_df[
+                [
+                    "model",
+                    "persona",
+                    "rho_human_entropy_vs_llm_entropy",
+                    "p_entropy",
+                    "rho_human_vr_vs_llm_vr",
+                    "p_variation_ratio",
+                    "rho_human_bin_vs_llm_entropy",
+                    "p_bin_trend",
+                    "rho_human_mean_vs_llm_mean_severity",
+                    "p_mean_severity",
+                    "mean_human_entropy",
+                    "mean_llm_entropy",
+                    "mean_human_vr",
+                    "mean_llm_vr",
+                ]
+            ],
+            on=["model", "persona"],
+            how="left",
+        )
+        .merge(
+            bin_tests_df[
+                [
+                    "model",
+                    "persona",
+                    "n_low",
+                    "n_medium",
+                    "n_high",
+                    "kruskal_p",
+                    "mannwhitney_low_vs_high_p",
+                    "mean_llm_entropy_high_minus_low",
+                ]
+            ],
+            on=["model", "persona"],
+            how="left",
+        )
+        .merge(
+            predictive_df[
+                [
+                    "model",
+                    "persona",
+                    "positive_rate_human_disagreement",
+                    "roc_auc",
+                    "pr_auc",
+                    "precision",
+                    "recall",
+                ]
+            ],
+            on=["model", "persona"],
+            how="left",
+        )
+    )
+
+    print("\n" + "=" * 80)
+    print("COMBINED PERSONA RQ3 SUMMARY")
+    print("=" * 80)
+    print(persona_summary.round(4))
+
+    persona_summary.to_csv(TABLES_PATH / "persona_rq3_summary.csv", index=False)
+    persona_summary.to_latex(
+        TABLES_PATH / "persona_rq3_summary.tex",
         index=False,
         float_format="%.3f",
     )
@@ -712,10 +782,6 @@ def analyze_mhs_persona_dataset(
         index=False,
         float_format="%.3f",
     )
-
-    # ============================================================
-    # Analysis 7: qualitative mismatch extraction
-    # ============================================================
 
     analysis_df["human_entropy_z"] = (
         analysis_df["human_entropy"] - analysis_df["human_entropy"].mean()
@@ -796,13 +862,64 @@ def analyze_mhs_persona_dataset(
         .unstack(fill_value=0)
     )
 
-    # ============================================================
-    # Plots
-    # ============================================================
+    # Save mismatch rates with denominators, matching the global analysis style.
+    high_denoms = (
+        analysis_df[analysis_df["human_disagreement_bin"] == "high_disagreement"]
+        .groupby(["model", "llm_persona"])
+        .size()
+        .rename("n_high_disagreement")
+        .reset_index()
+    )
 
-    # ------------------------------------------------------------
-    # Plot 1: boxplot, LLM entropy by human disagreement bin
-    # ------------------------------------------------------------
+    low_denoms = (
+        analysis_df[analysis_df["human_disagreement_bin"] == "low_disagreement"]
+        .groupby(["model", "llm_persona"])
+        .size()
+        .rename("n_low_disagreement")
+        .reset_index()
+    )
+
+    over_counts = (
+        overconfident_df
+        .groupby(["model", "llm_persona"])
+        .size()
+        .rename("overconfident")
+        .reset_index()
+    )
+
+    noisy_counts = (
+        noisy_df
+        .groupby(["model", "llm_persona"])
+        .size()
+        .rename("noisy")
+        .reset_index()
+    )
+
+    mismatch_summary = (
+        high_denoms
+        .merge(over_counts, on=["model", "llm_persona"], how="left")
+        .merge(low_denoms, on=["model", "llm_persona"], how="left")
+        .merge(noisy_counts, on=["model", "llm_persona"], how="left")
+        .fillna(0)
+    )
+
+    mismatch_summary["overconfident_rate"] = (
+        mismatch_summary["overconfident"] / mismatch_summary["n_high_disagreement"]
+    )
+
+    mismatch_summary["noisy_rate"] = (
+        mismatch_summary["noisy"] / mismatch_summary["n_low_disagreement"]
+    )
+
+    print("\nPersona mismatch summary:")
+    print(mismatch_summary.round(4))
+
+    mismatch_summary.to_csv(TABLES_PATH / "persona_mismatch_summary.csv", index=False)
+    mismatch_summary.to_latex(
+        TABLES_PATH / "persona_mismatch_summary.tex",
+        index=False,
+        float_format="%.3f",
+    )
 
     for (model_name, persona_name), model_df in analysis_df.groupby(["model", "llm_persona"]):
         safe_model = str(model_name).replace("/", "_").replace(":", "_")
@@ -835,10 +952,6 @@ def analyze_mhs_persona_dataset(
         )
 
         plt.close()
-
-    # ------------------------------------------------------------
-    # Plot 2: stacked bar, LLM variation ratio distribution
-    # ------------------------------------------------------------
 
     for (model_name, persona_name), model_df in analysis_df.groupby(["model", "llm_persona"]):
         safe_model = str(model_name).replace("/", "_").replace(":", "_")
@@ -885,9 +998,6 @@ def analyze_mhs_persona_dataset(
 
         plt.close()
 
-    # ------------------------------------------------------------
-    # Plot 3: scatter human entropy vs LLM entropy
-    # ------------------------------------------------------------
 
     for (model_name, persona_name), model_df in analysis_df.groupby(["model", "llm_persona"]):
         safe_model = str(model_name).replace("/", "_").replace(":", "_")
@@ -921,20 +1031,12 @@ def analyze_mhs_persona_dataset(
 
         plt.close()
 
-    # ------------------------------------------------------------
-    # Plot 4: ROC and PR curves per model/persona
-    # ------------------------------------------------------------
-
     for model_name, model_df_all in analysis_df.groupby("model"):
         safe_model = str(model_name).replace("/", "_").replace(":", "_")
 
         fig, (ax_roc, ax_pr) = plt.subplots(1, 2, figsize=(14, 6))
 
         plotted_any = False
-
-        no_skill_pr = (
-            model_df_all["human_disagreement_bin"] != "low_disagreement"
-        ).mean()
 
         for persona_name, model_df in model_df_all.groupby("llm_persona"):
             y_true = (
@@ -951,6 +1053,7 @@ def analyze_mhs_persona_dataset(
 
             roc_auc = roc_auc_score(y_true, y_score)
             pr_auc = average_precision_score(y_true, y_score)
+            pr_baseline = y_true.mean()
 
             ax_roc.plot(
                 fpr,
@@ -959,11 +1062,20 @@ def analyze_mhs_persona_dataset(
                 label=f"{persona_name} AUC={roc_auc:.2f}",
             )
 
-            ax_pr.plot(
+            pr_line, = ax_pr.plot(
                 recall_values,
                 precision_values,
                 linewidth=2,
-                label=f"{persona_name} AUC={pr_auc:.2f}",
+                label=f"{persona_name} AUC={pr_auc:.2f}, no-skill={pr_baseline:.2f}",
+            )
+
+            # Draw a persona-specific PR baseline in the same color.
+            ax_pr.axhline(
+                pr_baseline,
+                color=pr_line.get_color(),
+                linewidth=1.3,
+                linestyle=":",
+                alpha=0.8,
             )
 
             plotted_any = True
@@ -974,12 +1086,13 @@ def analyze_mhs_persona_dataset(
             ax_roc.set_xlabel("False positive rate")
             ax_roc.set_ylabel("True positive rate")
             ax_roc.legend()
+            ax_roc.grid(True, alpha=0.3)
 
-            ax_pr.plot([0, 1], [no_skill_pr, no_skill_pr], linestyle="--", label="Random")
             ax_pr.set_title("Precision-recall curve")
             ax_pr.set_xlabel("Recall")
             ax_pr.set_ylabel("Precision")
             ax_pr.legend()
+            ax_pr.grid(True, alpha=0.3)
 
             plt.suptitle(f"LLM variation ratio as human disagreement detector\n{model_name}")
             plt.tight_layout()
@@ -990,10 +1103,6 @@ def analyze_mhs_persona_dataset(
             )
 
         plt.close()
-
-    # ------------------------------------------------------------
-    # Plot 5: compact correlation heatmap table
-    # ------------------------------------------------------------
 
     heat_df = corr_df.copy()
     heat_df["row"] = heat_df["model"] + " | " + heat_df["persona"]
@@ -1042,12 +1151,11 @@ def analyze_mhs_persona_dataset(
         "bin_tests_df": bin_tests_df,
         "predictive_df": predictive_df,
         "behavior_df": behavior_df,
+        "noncomp_table": noncomp_table,
+        "persona_summary": persona_summary,
+        "mismatch_summary": mismatch_summary,
     }
 
-
-# ============================================================
-# Example main
-# ============================================================
 
 if __name__ == "__main__":
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
