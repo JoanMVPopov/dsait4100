@@ -41,6 +41,22 @@ conda env create -f environment.yml
 conda activate nlp-dsait4100
 ```
 
+## Processing
+
+If you want to change the preprocessing and filtering steps for the different datasets, you may do so in the `rq1/preprocess_hatexplain.py` and `rq3/dataset_processing.py` and then run 
+```bash
+python <filename> 
+```
+to apply it and save it in the respective folders
+
+## Running Experiments
+
+To run the hatespeech classification experiments with the exact same setup as the paper (you may change the output path and queries in the file), run
+```bash
+python workflow.py
+```
+With the current setup, this may take around 10 hours to run due to the larger size of the sets. 
+
 ## Notes
 
 If sufficient resources are available, using the non-quantized models could provide different results than the ones presented in the paper. 
