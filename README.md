@@ -12,9 +12,9 @@ https://docs.ollama.com/faq
 
 3) models
 ```bash
-ollama pull qwen3.5:9b-q8_0
-ollama pull llama3.1:8b-instruct-q8_0
-ollama pull deepseek-r1:8b-0528-qwen3-q8_0
+ollama pull qwen3.5:9b-q4_K_M
+ollama pull llama3.1:8b-instruct-q4_K_M
+ollama pull deepseek-r1:8b-0528-qwen3-q4_K_M
 ```
 
 4) env vars
@@ -40,6 +40,10 @@ Managed by conda
 conda env create -f environment.yml
 conda activate nlp-dsait4100
 ```
+
+## Notes
+
+If sufficient resources are available, using the non-quantized models could provide different results than the ones presented in the paper. 
 
 
 
