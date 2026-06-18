@@ -19,9 +19,9 @@ OUTPUT_PATH = PROJECT_ROOT / "results_ollama_runs.jsonl"
 SEEDS = [42, 43, 44, 45, 46]
 
 MODELS = [
-    {"name": "qwen3.5:9b-q8_0", "think": False},
-    {"name": "llama3.1:8b-instruct-q8_0", "think": False},
-    {"name": "deepseek-r1:8b-0528-qwen3-q8_0", "think": False},
+    {"name": "qwen3.5:9b-q4_K_M", "think": False},
+    {"name": "llama3.1:8b-instruct-q4_K_M", "think": False},
+    {"name": "deepseek-r1:8b-0528-qwen3-q4_K_M", "think": False},
 ]
 
 PERSONAS = {
@@ -45,7 +45,7 @@ You may classify speech as hate speech when it targets or harms a protected grou
 }
 
 # QUERIES = pd.read_csv("/workspace/hatexplain_sampled_wflow_ready_30.csv").to_dict(orient="records")
-QUERIES_PATH = PROJECT_ROOT / "data" / "hatexplain" / "hatexplain_sampled_wflow_ready_30.csv"
+QUERIES_PATH = PROJECT_ROOT / "data" / "measuringhatespeech" / "mhs_persona_entropy_bins_fixed_sampled.csv"
 QUERIES = pd.read_csv(QUERIES_PATH).to_dict(orient="records")
 
 async def run_one_request(
